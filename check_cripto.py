@@ -44,6 +44,11 @@ COINS = [
     "CAKE", "AXS", "SLP", "MANA", "SAND", "CHZ",
 ]
 
+# Exchanges que se excluyen de la comparacion (por ejemplo, porque no
+# dejan retirar/transferir fondos con facilidad). Nombres tal como los
+# devuelve la API de CriptoYa (en minuscula).
+EXCHANGES_EXCLUIDOS = {"astropay"}
+
 COMPRAS_PATTERN = re.compile(r"Compras a.{0,150}?([\d]{1,3}(?:\.\d{3})*,\d{2})", re.DOTALL)
 
 HEADERS = {
@@ -106,6 +111,9 @@ def mejor_exchange_mismo_lugar(coin: str, volumen: float):
 
     mejor = None
     for exch, info_usd in datos_usd.items():
+        if exch.lower() in EXCHANGES_EXCLUIDOS:
+            continue
+
         info_ars = datos_ars.get(exch)
         if not isinstance(info_usd, dict) or not isinstance(info_ars, dict):
             continue
