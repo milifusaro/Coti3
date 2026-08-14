@@ -24,4 +24,5 @@ jobs:
           THRESHOLD_ARS: "5.0"
           VOLUMEN: "100"
           MONTO_ARS: "100000"
+          COMISION_EXTRA_PCT: "0.3"
         run: python check_cripto.py
