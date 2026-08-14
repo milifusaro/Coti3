@@ -39,8 +39,10 @@ CRIPTOYA_URL_TEMPLATE = "https://criptoya.com/api/{coin}/{fiat}/{volumen}"
 TELEGRAM_API_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Todas las criptos que soporta el endpoint "cotizacion general" de CriptoYa Argentina.
+# (UXD y USDP figuran en la documentacion de CriptoYa pero la API real ya no
+# las reconoce -devuelve error 422-, asi que se excluyen de la lista.)
 COINS = [
-    "BTC", "ETH", "USDT", "USDC", "DAI", "UXD", "USDP", "WLD", "BNB", "SOL",
+    "BTC", "ETH", "USDT", "USDC", "DAI", "WLD", "BNB", "SOL",
     "XRP", "ADA", "AVAX", "DOGE", "TRX", "LINK", "DOT", "MATIC", "SHIB",
     "LTC", "BCH", "EOS", "XLM", "FTM", "AAVE", "UNI", "ALGO", "BAT", "PAXG",
     "CAKE", "AXS", "SLP", "MANA", "SAND", "CHZ",
@@ -72,10 +74,20 @@ def fetch_text(url: str) -> str:
         return resp.read().decode("utf-8", errors="ignore")
 
 
-def fetch_json(url: str):
+def fetch_json(url: str, intentos: int = 4):
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    espera = 1.5
+    for intento in range(intentos):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and intento < intentos - 1:
+                print(f"    (429 Too Many Requests, espero {espera:.1f}s y reintento...)")
+                time.sleep(espera)
+                espera *= 2  # backoff exponencial: 1.5s, 3s, 6s...
+                continue
+            raise
 
 
 def strip_html_tags(html: str) -> str:
@@ -156,7 +168,7 @@ def escanear_mejor_cripto(volumen: float, comision_extra_pct: float):
     for coin in COINS:
         try:
             resultado = mejor_exchange_mismo_lugar(coin, volumen, comision_extra_pct)
-            time.sleep(0.15)
+            time.sleep(0.5)
         except Exception as e:
             print(f"  aviso: no se pudo consultar {coin} ({e}), se omite")
             continue
