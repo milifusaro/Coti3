@@ -22,6 +22,8 @@ Variables de entorno necesarias:
   THRESHOLD_ARS       -> opcional, default 5.0 (ganancia minima en ARS por USD para avisar)
   VOLUMEN             -> opcional, default 100 (volumen de referencia para las cotizaciones)
   MONTO_ARS           -> opcional, default 100000 (monto de pesos de referencia para simular el circuito completo)
+  COMISION_EXTRA_PCT  -> opcional, default 0.3 (costo extra en %, aplicado en compra y en venta,
+                          para reflejar comisiones/perdidas que la cotizacion de CriptoYa no capta)
 """
 
 import os
@@ -96,18 +98,28 @@ def get_uala_compra() -> float:
     return parse_ar_number(match.group(1))
 
 
-def mejor_exchange_mismo_lugar(coin: str, volumen: float):
+def mejor_exchange_mismo_lugar(coin: str, volumen: float, comision_extra_pct: float):
     """Para una cripto, busca -entre los exchanges que la operan tanto en
     USD como en ARS- el que da la mejor tasa implicita comprando y
     vendiendo en el MISMO exchange (sin mover la cripto entre plataformas).
-    Devuelve (exchange, precio_compra_usd, precio_venta_ars, implicito) o
-    None si ningun exchange opera ambos pares para esa cripto."""
+
+    Ademas de lo que ya devuelve CriptoYa (totalAsk/totalBid, que incluyen
+    las comisiones de trade/transferencia del exchange), se descuenta un
+    costo extra de 'comision_extra_pct' tanto en la compra como en la
+    venta -por ejemplo, para reflejar comisiones de red o de conversion
+    que la cotizacion no capta del todo-.
+
+    Devuelve (exchange, precio_compra_usd_efectivo, precio_venta_ars_efectivo,
+    implicito) o None si ningun exchange opera ambos pares para esa cripto."""
     url_usd = CRIPTOYA_URL_TEMPLATE.format(coin=coin, fiat="USD", volumen=volumen)
     url_ars = CRIPTOYA_URL_TEMPLATE.format(coin=coin, fiat="ARS", volumen=volumen)
     datos_usd = fetch_json(url_usd)
     datos_ars = fetch_json(url_ars)
     if not isinstance(datos_usd, dict) or not isinstance(datos_ars, dict):
         return None
+
+    factor_compra = 1 + (comision_extra_pct / 100)  # encarece lo que pagas
+    factor_venta = 1 - (comision_extra_pct / 100)   # achica lo que recibis
 
     mejor = None
     for exch, info_usd in datos_usd.items():
@@ -125,21 +137,25 @@ def mejor_exchange_mismo_lugar(coin: str, volumen: float):
         if not isinstance(precio_ars, (int, float)) or precio_ars <= 0:
             continue
 
-        implicito = precio_ars / precio_usd
+        precio_usd_efectivo = precio_usd * factor_compra
+        precio_ars_efectivo = precio_ars * factor_venta
+
+        implicito = precio_ars_efectivo / precio_usd_efectivo
         if mejor is None or implicito > mejor[3]:
-            mejor = (exch, precio_usd, precio_ars, implicito)
+            mejor = (exch, precio_usd_efectivo, precio_ars_efectivo, implicito)
 
     return mejor
 
 
-def escanear_mejor_cripto(volumen: float):
+def escanear_mejor_cripto(volumen: float, comision_extra_pct: float):
     """Recorre todas las criptos y devuelve la combinacion (coin, exchange
     -el mismo para comprar y vender-, precio de compra, precio de venta,
-    tasa implicita ARS/USD) que mas rinde."""
+    tasa implicita ARS/USD) que mas rinde, ya con la comision extra
+    descontada."""
     mejor = None
     for coin in COINS:
         try:
-            resultado = mejor_exchange_mismo_lugar(coin, volumen)
+            resultado = mejor_exchange_mismo_lugar(coin, volumen, comision_extra_pct)
             time.sleep(0.15)
         except Exception as e:
             print(f"  aviso: no se pudo consultar {coin} ({e}), se omite")
@@ -183,6 +199,7 @@ def main() -> None:
     threshold_ars = float(os.environ.get("THRESHOLD_ARS", "5.0"))
     volumen = float(os.environ.get("VOLUMEN", "100"))
     monto_inicial = float(os.environ.get("MONTO_ARS", "100000"))
+    comision_extra_pct = float(os.environ.get("COMISION_EXTRA_PCT", "0.3"))
 
     if not bot_token or not chat_id:
         print("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en las variables de entorno.", file=sys.stderr)
@@ -191,7 +208,7 @@ def main() -> None:
     uala_compra = get_uala_compra()
     print(f"Uala (comprás a): {uala_compra:.2f} ARS/USD")
 
-    mejor = escanear_mejor_cripto(volumen)
+    mejor = escanear_mejor_cripto(volumen, comision_extra_pct)
     if mejor is None:
         print("No se pudo obtener ninguna cotizacion valida de CriptoYa. Se aborta este chequeo.")
         return
