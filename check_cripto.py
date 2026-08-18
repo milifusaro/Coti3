@@ -1,29 +1,36 @@
 """
-Chequea si conviene: comprar dolares en Uala -> comprar cripto con esos
-dolares (en cualquier exchange, al mejor precio) -> vender esa misma cripto
-por pesos (en cualquier exchange, al mejor precio) -> quedarte con mas pesos
-de los que gastaste comprando los dolares originales.
+Chequea si conviene: comprar dolares en Uala -> esos dolares entran a
+Binance como USDC (paso obligatorio, con su propia comision) -> comprar
+cripto con ese USDC (en el mejor exchange) -> vender esa misma cripto por
+pesos (en el mismo exchange) -> quedarte con mas pesos de los que gastaste
+comprando los dolares originales.
 
 Escanea TODAS las criptomonedas que soporta CriptoYa (BTC, ETH, USDT, USDC,
-DAI, SOL, XRP, etc.) y, para cada una, el mejor precio de compra en USD y el
-mejor precio de venta en ARS entre TODOS los exchanges que la operan. Se
-queda con la combinacion cripto+exchanges que mas ganancia deja.
+DAI, SOL, XRP, etc.) y, para cada una, busca -entre los exchanges que la
+operan tanto en USD como en ARS- el que da la mejor tasa comprando y
+vendiendo en el MISMO exchange. Se queda con la combinacion que mas
+ganancia deja.
 
 Fuente de Uala: ComparaDolar.ar.
 Fuente de criptos: CriptoYa (endpoint "cotizacion general", todos los
 exchanges para un par coin/fiat).
 
-Si hay ganancia (implicito > precio de Uala), manda un aviso a Telegram con
-la cripto, los exchanges de compra/venta, y cuanto es la ganancia.
+Si hay ganancia (terminas con mas pesos de los que empezaste, por al menos
+el umbral configurado), manda un aviso a Telegram con la cripto, el
+exchange, y el detalle del circuito completo.
 
 Variables de entorno necesarias:
-  TELEGRAM_BOT_TOKEN  -> token del bot (te lo da @BotFather)
-  TELEGRAM_CHAT_ID    -> tu chat id (te lo da @userinfobot)
-  THRESHOLD_ARS       -> opcional, default 5.0 (ganancia minima en ARS por USD para avisar)
-  VOLUMEN             -> opcional, default 100 (volumen de referencia para las cotizaciones)
-  MONTO_ARS           -> opcional, default 100000 (monto de pesos de referencia para simular el circuito completo)
-  COMISION_EXTRA_PCT  -> opcional, default 0.3 (costo extra en %, aplicado en compra y en venta,
-                          para reflejar comisiones/perdidas que la cotizacion de CriptoYa no capta)
+  TELEGRAM_BOT_TOKEN     -> token del bot (te lo da @BotFather)
+  TELEGRAM_CHAT_ID       -> tu chat id (te lo da @userinfobot)
+  THRESHOLD_ARS          -> opcional, default 5.0 (ganancia minima en ARS por USD para avisar)
+  VOLUMEN                -> opcional, default 100 (volumen de referencia para las cotizaciones)
+  MONTO_ARS              -> opcional, default 100000 (monto de pesos de referencia para simular el circuito completo)
+  COMISION_EXTRA_PCT     -> opcional, default 0.3 (costo extra en %, aplicado en la compra y en la
+                             venta de la cripto, para reflejar comisiones/perdidas que la cotizacion
+                             de CriptoYa no capta del todo)
+  COMISION_POR_CAMBIO_PCT -> opcional, default 0.1 (costo extra en %, aplicado a CADA cambio de
+                             moneda del circuito: USD->USDC, USDC->cripto, y cripto->ARS.
+                             Se suma a COMISION_EXTRA_PCT en los dos ultimos pasos)
 """
 
 import os
@@ -39,12 +46,12 @@ CRIPTOYA_URL_TEMPLATE = "https://criptoya.com/api/{coin}/{fiat}/{volumen}"
 TELEGRAM_API_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Todas las criptos que soporta el endpoint "cotizacion general" de CriptoYa Argentina.
-# (UXD y USDP figuran en la documentacion de CriptoYa pero la API real ya no
-# las reconoce -devuelve error 422-, asi que se excluyen de la lista.)
+# (UXD, USDP, MATIC, EOS y FTM figuran en la documentacion de CriptoYa pero
+# la API real ya no las reconoce -devuelve error 422-, asi que se excluyen.)
 COINS = [
     "BTC", "ETH", "USDT", "USDC", "DAI", "WLD", "BNB", "SOL",
-    "XRP", "ADA", "AVAX", "DOGE", "TRX", "LINK", "DOT", "MATIC", "SHIB",
-    "LTC", "BCH", "EOS", "XLM", "FTM", "AAVE", "UNI", "ALGO", "BAT", "PAXG",
+    "XRP", "ADA", "AVAX", "DOGE", "TRX", "LINK", "DOT", "SHIB",
+    "LTC", "BCH", "XLM", "AAVE", "UNI", "ALGO", "BAT", "PAXG",
     "CAKE", "AXS", "SLP", "MANA", "SAND", "CHZ",
 ]
 
@@ -110,16 +117,15 @@ def get_uala_compra() -> float:
     return parse_ar_number(match.group(1))
 
 
-def mejor_exchange_mismo_lugar(coin: str, volumen: float, comision_extra_pct: float):
+def mejor_exchange_mismo_lugar(coin: str, volumen: float, comision_pct_total: float):
     """Para una cripto, busca -entre los exchanges que la operan tanto en
     USD como en ARS- el que da la mejor tasa implicita comprando y
     vendiendo en el MISMO exchange (sin mover la cripto entre plataformas).
 
     Ademas de lo que ya devuelve CriptoYa (totalAsk/totalBid, que incluyen
-    las comisiones de trade/transferencia del exchange), se descuenta un
-    costo extra de 'comision_extra_pct' tanto en la compra como en la
-    venta -por ejemplo, para reflejar comisiones de red o de conversion
-    que la cotizacion no capta del todo-.
+    las comisiones de trade/transferencia del exchange), se descuenta
+    'comision_pct_total' tanto en la compra como en la venta -la suma de
+    COMISION_EXTRA_PCT y COMISION_POR_CAMBIO_PCT-.
 
     Devuelve (exchange, precio_compra_usd_efectivo, precio_venta_ars_efectivo,
     implicito) o None si ningun exchange opera ambos pares para esa cripto."""
@@ -130,8 +136,8 @@ def mejor_exchange_mismo_lugar(coin: str, volumen: float, comision_extra_pct: fl
     if not isinstance(datos_usd, dict) or not isinstance(datos_ars, dict):
         return None
 
-    factor_compra = 1 + (comision_extra_pct / 100)  # encarece lo que pagas
-    factor_venta = 1 - (comision_extra_pct / 100)   # achica lo que recibis
+    factor_compra = 1 + (comision_pct_total / 100)  # encarece lo que pagas
+    factor_venta = 1 - (comision_pct_total / 100)   # achica lo que recibis
 
     mejor = None
     for exch, info_usd in datos_usd.items():
@@ -159,15 +165,14 @@ def mejor_exchange_mismo_lugar(coin: str, volumen: float, comision_extra_pct: fl
     return mejor
 
 
-def escanear_mejor_cripto(volumen: float, comision_extra_pct: float):
+def escanear_mejor_cripto(volumen: float, comision_pct_total: float):
     """Recorre todas las criptos y devuelve la combinacion (coin, exchange
     -el mismo para comprar y vender-, precio de compra, precio de venta,
-    tasa implicita ARS/USD) que mas rinde, ya con la comision extra
-    descontada."""
+    tasa implicita ARS/USD) que mas rinde, ya con las comisiones descontadas."""
     mejor = None
     for coin in COINS:
         try:
-            resultado = mejor_exchange_mismo_lugar(coin, volumen, comision_extra_pct)
+            resultado = mejor_exchange_mismo_lugar(coin, volumen, comision_pct_total)
             time.sleep(0.5)
         except Exception as e:
             print(f"  aviso: no se pudo consultar {coin} ({e}), se omite")
@@ -212,6 +217,7 @@ def main() -> None:
     volumen = float(os.environ.get("VOLUMEN", "100"))
     monto_inicial = float(os.environ.get("MONTO_ARS", "100000"))
     comision_extra_pct = float(os.environ.get("COMISION_EXTRA_PCT", "0.3"))
+    comision_por_cambio_pct = float(os.environ.get("COMISION_POR_CAMBIO_PCT", "0.1"))
 
     if not bot_token or not chat_id:
         print("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en las variables de entorno.", file=sys.stderr)
@@ -220,15 +226,26 @@ def main() -> None:
     uala_compra = get_uala_compra()
     print(f"Uala (comprás a): {uala_compra:.2f} ARS/USD")
 
-    mejor = escanear_mejor_cripto(volumen, comision_extra_pct)
+    # La comision que se aplica en la compra y en la venta de la cripto es
+    # la suma de la comision "extra" original mas la comision por cada
+    # cambio de moneda (que tambien se le suma a este paso).
+    comision_compra_venta_pct = comision_extra_pct + comision_por_cambio_pct
+
+    mejor = escanear_mejor_cripto(volumen, comision_compra_venta_pct)
     if mejor is None:
         print("No se pudo obtener ninguna cotizacion valida de CriptoYa. Se aborta este chequeo.")
         return
 
     # Simulacion del circuito completo con un monto de referencia:
-    # pesos -> dolares (Uala) -> cripto (compra) -> pesos (venta)
+    # pesos -> dolares (Uala) -> USDC (paso obligatorio al entrar a Binance)
+    # -> cripto (compra) -> pesos (venta)
     dolares_comprados = monto_inicial / uala_compra
-    cantidad_cripto = dolares_comprados / mejor["precio_usd"]
+
+    # Paso obligatorio: USD -> USDC al entrar a Binance, con su propia comision.
+    factor_usd_a_usdc = 1 - (comision_por_cambio_pct / 100)
+    usdc_disponible = dolares_comprados * factor_usd_a_usdc
+
+    cantidad_cripto = usdc_disponible / mejor["precio_usd"]
     monto_final = cantidad_cripto * mejor["precio_ars"]
 
     ganancia_ars = monto_final - monto_inicial
@@ -238,16 +255,18 @@ def main() -> None:
 
     print(f"Mejor cripto: {mejor['coin']}")
     print(f"  1) Comprás dolares en Uala: {monto_inicial:.2f} ARS -> {dolares_comprados:.4f} USD")
-    print(f"  2) Comprás {mejor['coin']} en {mejor['exchange']}: {dolares_comprados:.4f} USD -> {cantidad_cripto:.6f} {mejor['coin']}")
-    print(f"  3) Vendés {mejor['coin']} en {mejor['exchange']} (mismo exchange): {cantidad_cripto:.6f} {mejor['coin']} -> {monto_final:.2f} ARS")
+    print(f"  2) Entran a Binance como USDC (comision {comision_por_cambio_pct}%): {dolares_comprados:.4f} USD -> {usdc_disponible:.4f} USDC")
+    print(f"  3) Comprás {mejor['coin']} en {mejor['exchange']}: {usdc_disponible:.4f} USDC -> {cantidad_cripto:.6f} {mejor['coin']}")
+    print(f"  4) Vendés {mejor['coin']} en {mejor['exchange']} (mismo exchange): {cantidad_cripto:.6f} {mejor['coin']} -> {monto_final:.2f} ARS")
     print(f"Resultado: {monto_inicial:.2f} ARS -> {monto_final:.2f} ARS (ganancia {ganancia_ars:.2f} ARS, {ganancia_pct:.2f}%)")
 
     if ganancia_por_usd >= threshold_ars:
         mensaje = (
-            f"🟢 <b>Oportunidad detectada: pesos → dólares (Ualá) → cripto → pesos</b>\n\n"
+            f"🟢 <b>Oportunidad detectada: pesos → dólares (Ualá) → USDC → cripto → pesos</b>\n\n"
             f"Empezás con: <b>{monto_inicial:,.0f} ARS</b>\n"
             f"1) Comprás dólares en Ualá: → {dolares_comprados:.2f} USD\n"
-            f"2) Comprás y vendés <b>{mejor['coin']}</b> en <b>{mejor['exchange']}</b> (mismo exchange)\n"
+            f"2) Entran a Binance como USDC: → {usdc_disponible:.2f} USDC\n"
+            f"3) Comprás y vendés <b>{mejor['coin']}</b> en <b>{mejor['exchange']}</b> (mismo exchange)\n"
             f"Terminás con: <b>{monto_final:,.0f} ARS</b>\n\n"
             f"Ganancia: <b>{ganancia_ars:,.0f} ARS ({ganancia_pct:.2f}%)</b>\n"
             f"(equivale a {ganancia_por_usd:.2f} ARS por dólar; umbral: {threshold_ars:.2f})"
